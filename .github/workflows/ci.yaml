@@ -95,9 +95,18 @@ jobs:
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
           bench --site test_site install-app erpnext_egypt_compliance
+          bench --site test_site execute erpnext_egypt_compliance.installation.verify_standalone_installation
+          bench --site test_site migrate --skip-search-index
+          bench --site test_site execute erpnext_egypt_compliance.installation.verify_standalone_installation
           bench build
         env:
           CI: 'Yes'
+
+      - name: Standalone packaging and receipt unit tests
+        working-directory: /home/runner/frappe-bench
+        run: |
+          env/bin/pip install -e 'apps/erpnext_egypt_compliance[test]'
+          env/bin/python -m pytest -o addopts='' apps/erpnext_egypt_compliance/tests/test_standalone_installation.py apps/erpnext_egypt_compliance/tests/test_ereceipt_returns.py -q
 
       # - name: Run Tests
       #   working-directory: /home/runner/frappe-bench

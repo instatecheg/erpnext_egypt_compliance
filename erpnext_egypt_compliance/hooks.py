@@ -8,6 +8,7 @@ app_icon = "octicon octicon-file-directory"
 app_color = "grey"
 app_email = "apps@axentor.co"
 app_license = "CC"
+required_apps = ["erpnext"]
 
 
 doctype_js = {
@@ -49,6 +50,12 @@ user_data_fields = [
 ]
 
 scheduler_events = {
+    "cron": {
+        # every 10 minutes - poll ETA for any submission (POS or Sales Invoice) still pending
+        "0/10 * * * *": [
+            "erpnext_egypt_compliance.erpnext_eta.doctype.eta_log.eta_log.auto_validate_pending_submissions",
+        ],
+    },
     "hourly_long": [
         "erpnext_egypt_compliance.erpnext_eta.main.autosubmit_eta_batch_process",
         "erpnext_egypt_compliance.erpnext_eta.utils.autofetch_eta_status_process",
@@ -151,6 +158,29 @@ fixtures = [
                     "Item-eta_item_code",
                     "Item-eta_cb_2",
                     "Item-gpc",
+                    "Item-eta_egs_code",
+                    "Item-eta_gs1_code",
+                    "POS Invoice-eta_tab",
+                    "POS Invoice-eta_status",
+                    "POS Invoice-eta_validate_status",
+                    "POS Invoice-eta_document_status",
+                    "POS Invoice-eta_column_section",
+                    "POS Invoice-eta_submissionid",
+                    "POS Invoice-eta_attached_qr",
+                    "POS Invoice-eta_qr",
+                    "POS Invoice-eta_qr_data",
+                    "POS Invoice-eta_success_section",
+                    "POS Invoice-eta_uuid",
+                    "POS Invoice-eta_hashkey",
+                    "POS Invoice-etas_column_section",
+                    "POS Invoice-eta_reference_old_uuid",
+                    "POS Invoice-eta_previous_uuid",
+                    "POS Invoice-eta_issued_datetime",
+                    "POS Invoice-eta_send_with_current_date",
+                    "POS Invoice-eta_longid",
+                    "POS Invoice-eta_failure_section",
+                    "POS Invoice-eta_error_message",
+                    "POS Invoice-eta_cr_message",
                 ],
             ]
         ],

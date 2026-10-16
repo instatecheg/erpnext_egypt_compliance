@@ -1,6 +1,7 @@
 import collections
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
@@ -8,7 +9,7 @@ from uuid import uuid4
 import frappe
 import frappe.utils
 import pytz
-from pydantic import BaseModel, Field, conint, validator
+from pydantic import BaseModel, Field, validator
 
 from erpnext_egypt_compliance.erpnext_eta.utils import (
     eta_datetime_issued_format,
@@ -16,6 +17,10 @@ from erpnext_egypt_compliance.erpnext_eta.utils import (
 )
 from frappe import _
 from erpnext_egypt_compliance.erpnext_eta.ereceipt_submitter import EReceiptSubmitter
+from erpnext_egypt_compliance.erpnext_eta.ereceipt_returns import (
+    get_original_receipt,
+    normalize_return_amounts,
+)
 
 POS_INVOICE_RAW_DATA = {}
 COMPANY_DATA = {}
@@ -84,7 +89,7 @@ class SingleTaxableItems(BaseModel):
     taxType: str = Field(..., description="Tax type.")
     amount: float = Field(default=0.0)
     subType: str = Field(default="", description="Sub type.")
-    rate: int = conint(ge=0, le=100)
+    rate: float = Field(..., ge=0, le=100)
 
     @validator("taxType")
     def validate_tax_types(cls, value, values):
@@ -150,12 +155,8 @@ class SingleItemData(BaseModel):
     totalSale: float = Field(..., description="Total amount for the receipt line after applying discount.")
     total: float = Field(..., description="Total amount for the receipt line after applying discount.")
 
-    # commercialDiscountData: Optional[SingleCommercialDiscountData] = Field(
-    #     description="discounts applied to this item."
-    # )
-    # itemDiscountData: Optional[SingleItemDiscountData] = Field(
-    #     description="collection of objects of non-taxable items discounts."
-    # )
+    commercialDiscountData: Optional[List[SingleCommercialDiscountData]] = None
+    itemDiscountData: Optional[List[SingleItemDiscountData]] = None
     # valueDifference: Optional[float] = Field(
     #     default=0, description="Value difference when selling goods already taxed."
     # )
@@ -186,28 +187,38 @@ class ReceiptBuyer(BaseModel):
 
     @validator("id")
     def validate_id(cls, value, values):
-        # TODO: P/F cases
         customer = POS_INVOICE_RAW_DATA.get("customer")
         customer_tax_id = frappe.db.get_value("Customer", customer, "tax_id") or ""
+        customer_tax_id = str(customer_tax_id).strip()
 
         if values.get("type") == "B":
             # Company Registration No. (RIN)
-            if not customer_tax_id or len(str(customer_tax_id)) != 14:
+            if not re.fullmatch(r"[0-9]{14}", customer_tax_id):
                 frappe.throw(
                 _("Customer {0} must have a valid 14-digit Tax ID for business receipts.").format(customer),
                 title=_("ETA Validation"),
             )
             return customer_tax_id
         
-        if values.get("type") == "P" and POS_INVOICE_RAW_DATA.get('grand_total') >= 150000:
-            if not customer_tax_id or len(str(customer_tax_id)) != 14:
+        if values.get("type") == "P":
+            threshold = frappe.db.get_value(
+                "ETA POS Connector",
+                POS_INVOICE_RAW_DATA.get("pos_profile"),
+                "buyer_id_required_amount",
+            )
+            if threshold is None:
+                threshold = 50000
+            threshold = frappe.utils.flt(threshold)
+            requires_id = bool(threshold) and POS_INVOICE_RAW_DATA.get("grand_total", 0) >= threshold
+            is_valid_national_id = bool(re.fullmatch(r"[0-9]{14}", customer_tax_id))
+            if requires_id and not is_valid_national_id:
                 frappe.throw(
-                    _("Customer {0} must have a valid Tax ID (14 digits) for e-receipts with grand total equal or above 150,000 EGP.").format(customer),
+                    _("Customer {0} must have a valid 14-digit national ID because this receipt reaches the configured buyer ID threshold.").format(customer),
                     title=_("ETA Validation"),
                 )
-            return customer_tax_id
+            return customer_tax_id if is_valid_national_id else ""
 
-        return customer_tax_id or ""
+        return customer_tax_id
 
 
     @validator("name")
@@ -241,15 +252,16 @@ class ReceiptSeller(BaseModel):
 
 
 class ReceiptDocumentType(BaseModel):
-    receiptType: str = Field(default="s", description="Receipt Type Codes. s: Sale Receipt")
+    receiptType: str = Field(default="s", description="Receipt Type Codes. s: Sale Receipt, r: Return Receipt")
     typeVersion: str = Field(default="1.2", description="SDK Version")
 
 
 class ReceiptHeader(BaseModel):
-    dateTimeIssued: datetime = Field(..., description="Date and time of the receipt issue")
+    dateTimeIssued: str = Field(..., description="Date and time of the receipt issue")
     receiptNumber: str = Field(..., description="Receipt Number. Unique per branch within the same submission")
     uuid: str = Field(default_factory="", description="Unique ID for the receipt")
     previousUUID: str = Field(default="", description="When receipt type is return")
+    referenceUUID: Optional[str] = Field(default=None, description="Original sales receipt UUID for returns.")
     referenceOldUUID: str = Field(
         default="",
         description="validation failure and requirement to change something.",
@@ -305,8 +317,8 @@ class Receipt(BaseModel):
     buyer: ReceiptBuyer
     itemData: List[SingleItemData]
     totalSales: float
-    # totalCommercialDiscount: float
-    # totalItemsDiscount: float
+    totalCommercialDiscount: float = 0.0
+    totalItemsDiscount: float = 0.0
     # extraReceiptDiscountData: List[SingleExtraReceiptDiscountData]
     netAmount: float
     # feesAmount: float
@@ -344,13 +356,46 @@ def build_erceipt_json(docname: str, doctype: str):
     set_global_raw_data(docname, doctype)
 
     header: ReceiptHeader = get_pos_ereceipt_header()
-    document_type: ReceiptDocumentType = ReceiptDocumentType()
+    document_type: ReceiptDocumentType = ReceiptDocumentType(
+        receiptType="r" if POS_INVOICE_RAW_DATA.get("is_return") else "s"
+    )
     seller: ReceiptSeller = get_pos_receipt_seller()
     buyer: ReceiptBuyer = get_pos_receipt_buyer()
     item_data: List[SingleItemData] = get_pos_receipt_item_data()
     total_sales: float = frappe.utils.flt(sum([item.totalSale for item in item_data]), 5)
     net_amount: float = frappe.utils.flt(sum([item.netSale for item in item_data]), 5)
     total_amount: float = sum([item.total for item in item_data])
+    total_items_discount = frappe.utils.flt(
+        sum(sum(discount.amount for discount in item.itemDiscountData or []) for item in item_data),
+        5,
+    )
+    total_commercial_discount = frappe.utils.flt(
+        sum(sum(discount.amount for discount in item.commercialDiscountData or []) for item in item_data),
+        5,
+    )
+    if frappe.utils.flt(total_sales - total_items_discount - total_commercial_discount, 2) != frappe.utils.flt(net_amount, 2):
+        frappe.throw(
+            _("Generated eReceipt discounts do not reconcile with the invoice net amount."),
+            title=_("ETA Validation"),
+        )
+    invoice_total = frappe.utils.flt(POS_INVOICE_RAW_DATA.get("grand_total"), 2)
+    if frappe.utils.flt(total_amount, 2) != invoice_total:
+        frappe.throw(
+            _("Generated eReceipt total {0} does not match invoice total {1}.").format(
+                frappe.utils.fmt_money(total_amount, currency=POS_INVOICE_RAW_DATA.get("currency")),
+                frappe.utils.fmt_money(invoice_total, currency=POS_INVOICE_RAW_DATA.get("currency")),
+            ),
+            title=_("ETA Validation"),
+        )
+    invoice_total = frappe.utils.flt(POS_INVOICE_RAW_DATA.get("grand_total"), 2)
+    if frappe.utils.flt(total_amount, 2) != invoice_total:
+        frappe.throw(
+            _("Generated eReceipt total {0} does not match invoice total {1}.").format(
+                frappe.utils.fmt_money(total_amount, currency=POS_INVOICE_RAW_DATA.get("currency")),
+                frappe.utils.fmt_money(invoice_total, currency=POS_INVOICE_RAW_DATA.get("currency")),
+            ),
+            title=_("ETA Validation"),
+        )
     # TODO make payment method dynamic
     payment_method: str = "C"
     adjustment: float = 0.0
@@ -374,8 +419,8 @@ def build_erceipt_json(docname: str, doctype: str):
             buyer=buyer,
             itemData=item_data,
             totalSales=total_sales,
-            # totalCommercialDiscount=total_commercial_discount,
-            # totalItemsDiscount=total_items_discount,
+            totalCommercialDiscount=total_commercial_discount,
+            totalItemsDiscount=total_items_discount,
             # extraReceiptDiscountData=extra_receipt_discount_data,
             netAmount=net_amount,
             # feesAmount=fees_amount,
@@ -390,7 +435,7 @@ def build_erceipt_json(docname: str, doctype: str):
     seconds = POS_INVOICE_RAW_DATA.get("posting_time").seconds
     date_formated = eta_datetime_issued_format(POS_INVOICE_RAW_DATA.get("posting_date"), seconds)
     receipt.header.dateTimeIssued = date_formated
-    uuid = validate_and_generate_uuid(receipt.model_dump())
+    uuid = validate_and_generate_uuid(receipt.model_dump(exclude_none=True))
     receipt.header.uuid = uuid
     receipts.append(receipt)
     # signatures: List[SingleSignature] = [SingleSignature()]
@@ -404,7 +449,7 @@ def build_erceipt_json(docname: str, doctype: str):
 def download_ereceipt_json(docname, doctype):
     try:
         file_content = build_erceipt_json(docname, doctype)
-        ereceipt_as_json = file_content.model_dump_json()
+        ereceipt_as_json = file_content.model_dump_json(exclude_none=True)
         return download_eta_ereceipt_json(docname, ereceipt_as_json)
     except ValueError as e:
         frappe.log_error(title="Download E-Receipt", message=e, reference_doctype="POS Invoice", reference_name=docname)
@@ -420,36 +465,71 @@ def download_eta_ereceipt_json(docname, file_content):
 
 
 @frappe.whitelist()
-def submit_ereceipt(docname, pos_profile, doctype, raise_throw=True) -> None:
+def submit_ereceipt(docname, pos_profile, doctype, raise_throw=True) -> dict:
     """Submit the POS E-Receipt to the API."""
     try:
+        doc = frappe.get_doc(doctype, docname)
+        doc.check_permission("submit")
+        if doc.get("is_return"):
+            if doctype != "POS Invoice" or doc.docstatus != 1:
+                frappe.throw(_("Submit the POS return locally before sending its eReceipt to ETA."))
+            if doc.get("pos_profile") != pos_profile:
+                frappe.throw(_("Use the return invoice's POS connector."))
+            if doc.get("eta_status") != "Invalid" and (
+                doc.get("eta_status") or doc.get("eta_uuid") or doc.get("eta_submissionid")
+            ):
+                frappe.throw(_("This return already has an ETA submission. Fetch its status instead of submitting again."))
         ereceipt = build_erceipt_json(docname, doctype)
         connector = frappe.get_doc("ETA POS Connector", pos_profile)
         if connector:
             eta_submitter = EReceiptSubmitter(connector)
-            processed_docs = eta_submitter.submit_ereceipt(ereceipt.model_dump(), doctype)
+            return eta_submitter.submit_ereceipt(ereceipt.model_dump(exclude_none=True), doctype)
     except Exception as e:
-        frappe.log_error(title="Submit E-Receipt", message=e, reference_doctype="POS Invoice", reference_name=docname)
+        frappe.log_error(title="Submit E-Receipt", message=frappe.get_traceback(), reference_doctype="POS Invoice", reference_name=docname)
         if raise_throw:
             frappe.throw(
-                    _(e),
-                    title=_("Submitting e-Receipt Failed"),)
+                str(e),
+                title=_("Submitting e-Receipt Failed"),
+            )
+        return {"error": str(e)}
         
-@frappe.whitelist()      
+@frappe.whitelist()
 def fetch_ereceipt_status(docname, raise_throw=True):
+    """Pull the latest submission status from ETA and sync it back onto the POS Invoice.
+
+    Delegates to ``ETA Log.get_submission_status``, which is the only code path that
+    actually knows how to call ``EReceiptSubmitter`` correctly (connector + submission id)
+    and write the result back to both the ETA Log and the originating document.
+    """
     try:
-        pos_profile = frappe.db.get_value("POS Invoice", docname, "pos_profile")
-        connector = frappe.get_doc("ETA POS Connector", pos_profile)
-        if connector:
-            result = connector.get_receipt_submission(docname)
-            if raise_throw:
-                frappe.msgprint(_(str(result)))
+        log_name = frappe.db.get_value(
+            "ETA Log Documents",
+            {"reference_doctype": "POS Invoice", "reference_document": docname},
+            "parent",
+        )
+        if not log_name:
+            submission_id = frappe.db.get_value("POS Invoice", docname, "eta_submissionid")
+            frappe.throw(
+                _("No ETA Log was found for {0} (submission id: {1}). Submit the eReceipt first.").format(
+                    docname, submission_id or _("none")
+                )
+            )
+        log = frappe.get_doc("ETA Log", log_name)
+        log.get_submission_status()
+        result = frappe.db.get_value(
+            "POS Invoice", docname, ["eta_status", "eta_error_message"], as_dict=True
+        )
+        if raise_throw:
+            frappe.msgprint(_(str(result)))
+        return result
     except Exception as e:
-        frappe.log_error(title="Fetch e-Receipt Status", message=e, reference_doctype="POS Invoice", reference_name=docname)
+        frappe.log_error(title="Fetch e-Receipt Status", message=frappe.get_traceback(), reference_doctype="POS Invoice", reference_name=docname)
         if raise_throw:
             frappe.throw(
-                    _(e),
-                    title=_("Fetch e-Receipt Failed"),)
+                str(e),
+                title=_("Fetch e-Receipt Failed"),
+            )
+        return {"error": str(e)}
 
 
 def _pos_total_qty():
@@ -466,7 +546,20 @@ def set_global_raw_data(docname: str, doctype: str) -> None:
     global COMPANY_DATA
 
     # Set the global POS data
-    POS_INVOICE_RAW_DATA = frappe.get_doc(doctype, docname).as_dict()
+    doc = frappe.get_doc(doctype, docname)
+    doc.check_permission("read")
+    POS_INVOICE_RAW_DATA = doc.as_dict()
+    posting_time = frappe.utils.get_timedelta(POS_INVOICE_RAW_DATA.get("posting_time"))
+    if posting_time is None:
+        frappe.throw(_("Set a valid posting time before generating an eReceipt."))
+    POS_INVOICE_RAW_DATA["posting_time"] = posting_time
+    POS_INVOICE_RAW_DATA["posting_date"] = frappe.utils.getdate(doc.posting_date)
+    if doc.get("is_return"):
+        if doctype != "POS Invoice":
+            frappe.throw(_("Return eReceipts are supported only for POS Invoices."))
+        original = get_original_receipt(doc)
+        POS_INVOICE_RAW_DATA["_original_receipt_uuid"] = original.eta_uuid
+        normalize_return_amounts(POS_INVOICE_RAW_DATA)
     _pos_total_qty()
 
     # Set the global company data
@@ -479,14 +572,25 @@ def get_pos_ereceipt_header() -> ReceiptHeader:
         dateTimeIssued=POS_INVOICE_RAW_DATA.get("posting_date"),
         receiptNumber=POS_INVOICE_RAW_DATA.get("name"),
         currency=POS_INVOICE_RAW_DATA.get("currency"),
-        uuid=""
+        uuid="",
+        referenceOldUUID=(
+            POS_INVOICE_RAW_DATA.get("eta_uuid")
+            if POS_INVOICE_RAW_DATA.get("eta_status") == "Invalid"
+            else ""
+        ),
     )
+    if POS_INVOICE_RAW_DATA.get("is_return"):
+        header.referenceUUID = POS_INVOICE_RAW_DATA["_original_receipt_uuid"]
     return header
 
 
 def get_pos_receipt_seller() -> ReceiptSeller:
     """Get the POS E-Receipt Seller."""
-    branch = frappe.get_doc("Branch", COMPANY_DATA.get("eta_default_branch")).as_dict()
+    connector = frappe.get_doc("ETA POS Connector", POS_INVOICE_RAW_DATA.get("pos_profile"))
+    branch_name = connector.get("eta_branch") or COMPANY_DATA.get("eta_default_branch")
+    if not branch_name:
+        frappe.throw(_("Set an ETA branch on the POS connector or company before submitting eReceipts."))
+    branch = frappe.get_doc("Branch", branch_name).as_dict()
     branch_address = frappe.get_doc("Address", branch.get("eta_branch_address")).as_dict()
     country_code = frappe.db.get_value("Country", branch_address.country, "code")
     device_serial = str(frappe.db.get_value("ETA POS Connector", POS_INVOICE_RAW_DATA.get("pos_profile"), "serial_number"))
@@ -502,8 +606,8 @@ def get_pos_receipt_seller() -> ReceiptSeller:
             governate=branch_address.get("state"),
             regionCity=branch_address.get("city"),
             street=branch_address.get("address_line1"),
-            buildingNumber=branch_address.get("building_number"),
-            # postalCode=company.get("company"),
+            buildingNumber=branch_address.get("building_number") or branch_address.get("address_line2"),
+            postalCode=branch_address.get("pincode") or "",
             # floor=company.get("company"),
             # room=company.get("company"),
             # landmark=company.get("company"),
@@ -542,11 +646,23 @@ def _get_taxable_items(_item: dict) -> List[SingleTaxableItems]:
     taxable_items = []
     if POS_INVOICE_RAW_DATA.get("taxes"):
         for tax in POS_INVOICE_RAW_DATA.get("taxes"):
-            # TODO: Hardcoded, Type: T1, SubType: V009, amount=_get_tax_amount()
             item_wise_tax_detail_asjson = json.loads(tax.item_wise_tax_detail)
             items_tax_detail_list = ItemWiseTaxDetails(data=item_wise_tax_detail_asjson)
 
             item_tax_detail = items_tax_detail_list.data.get(_item.get("item_code"))
+            if not item_tax_detail:
+                continue
+            sub_type = tax.get("eta_tax_sub_type") or tax.get("eta_tax_type")
+            tax_type = frappe.db.get_value("ETA Tax Type", sub_type, "parent_eta_tax_type")
+            if not tax_type:
+                tax_type = tax.get("eta_tax_type")
+            if tax_type not in {f"T{i}" for i in range(1, 13)} or sub_type not in {
+                f"V{i:03}" for i in range(1, 11)
+            }:
+                frappe.throw(
+                    _("ETA tax type and subtype must be configured for tax row {0}.").format(tax.name),
+                    title=_("ETA Validation"),
+                )
             amount = _get_tax_amount(
                 (item_tax_detail[0] / 100),
                 _item.get("net_rate"),
@@ -555,8 +671,8 @@ def _get_taxable_items(_item: dict) -> List[SingleTaxableItems]:
             )
             taxable_items.append(
                 SingleTaxableItems(
-                    taxType="T1",
-                    subType="V001",
+                    taxType=tax_type,
+                    subType=sub_type,
                     amount=amount,
                     rate=item_tax_detail[0],
                 )
@@ -577,38 +693,36 @@ def _eta_round(_value: float, decimal: int = 2) -> float:
     return round(_value, precision)
 
 
-def _get_unit_price(_item: dict) -> float:
-    """Get the unit price of an item."""
-    unit_price = _item.get("net_rate") * (_item.get("_exchange_rate") or 1)
-    return _eta_round(unit_price)
-
-
 def _get_item_metrics(_item: dict) -> Dict:
-    unit_price = _get_unit_price(_item)
     exchange_rate = _item.get("_exchange_rate") or 1
 
     net_sale = _item.get("net_amount")
-    total_sale = net_sale + _item.get("discount_amount")
-
-    # TODO: Hardcoded
-    tax_rate = (_item.get("tax_rate") or 14) / 100
-    item_tax_amount = net_sale * tax_rate
-    item_total = _eta_round(net_sale + item_tax_amount)
+    line_discount = frappe.utils.flt(_item.get("discount_amount")) + frappe.utils.flt(
+        _item.get("distributed_discount_amount")
+    )
+    total_sale = net_sale + line_discount
+    quantity = _item.get("qty")
+    if not quantity:
+        frappe.throw(_("Item {0} must have a non-zero quantity for an eReceipt.").format(_item.get("item_code")))
+    unit_price = _eta_round((total_sale / quantity) * exchange_rate)
 
     taxable_items = _get_taxable_items(_item)
+    item_total = _eta_round(net_sale + sum(tax.amount for tax in taxable_items))
 
     item_unit_type = frappe.get_value("UOM", _item.get("uom"), "eta_uom") or frappe.get_value(
         "ETA Settings", "ETA Settings", "eta_uom"
     )
-    item_code = (
-        _item.get("eta_item_code")
-        or frappe.get_value("Item", _item.get("item_code"), "eta_item_code")
-        or _item.get("item_code")
-    )
+    item_meta = frappe.get_meta("Item")
+    item_code = _item.get("eta_item_code")
+    for fieldname in ("eta_item_code", "eta_egs_code"):
+        if not item_code and item_meta.has_field(fieldname):
+            item_code = frappe.db.get_value("Item", _item.get("item_code"), fieldname)
+    item_code = item_code or _item.get("item_code")
     return {
         "unit_price": unit_price,
         "exchange_rate": exchange_rate,
         "net_sale": net_sale,
+        "discount_amount": line_discount,
         "taxable_items": taxable_items,
         "item_total": item_total,
         "item_unit_type": item_unit_type,
@@ -626,7 +740,15 @@ def get_pos_receipt_item_data() -> List[SingleItemData]:
             SingleItemData(
                 internalCode=item.get("item_code"),
                 description=item.get("item_name"),
-                itemType=item.get("eta_code_type", "EGS"),
+                itemType=(
+                    item.get("eta_code_type")
+                    or (
+                        frappe.db.get_value("Item", item.get("item_code"), "item_type")
+                        if frappe.get_meta("Item").has_field("item_type")
+                        else None
+                    )
+                    or "EGS"
+                ),
                 quantity=item.get("qty"),
                 itemCode=item_metrics.get("item_code"),
                 unitType=item_metrics.get("item_unit_type"),
@@ -636,9 +758,12 @@ def get_pos_receipt_item_data() -> List[SingleItemData]:
                 totalSale=item_metrics.get("total_sale"),
                 taxableItems=item_metrics.get("taxable_items"),
                 total=item_metrics.get("item_total"),
-                # commercialDiscountData=[],
-                # valueDifference=0,
-                # itemDiscountData=[],
+                commercialDiscountData=(
+                    [SingleCommercialDiscountData(amount=item_metrics.get("discount_amount"), description="Commercial discount")]
+                    if item_metrics.get("discount_amount")
+                    else []
+                ),
+                itemDiscountData=[],
             )
         )
     return item_data

@@ -67,6 +67,7 @@ class ETALog(Document):
                     "accepted": False,
                 }
                 child_rows.get(docname, {}).update(fields)
+        self.save()
 
     def update_eta_fields(self, doc, docname, eta_response, submission_id, eta_status=None):
         if self.from_doctype == "Sales Invoice":
@@ -79,13 +80,19 @@ class ETALog(Document):
             }
         else:
             fields = {
-                "custom_eta_uuid": doc.get("uuid"),
-                "custom_eta_hash_key": doc.get("hashKey"),
-                "custom_eta_long_id": doc.get("longId"),
-                "custom_eta_submission_id": submission_id,
-                "custom_eta_status": eta_status,
+                "eta_uuid": doc.get("uuid"),
+                "eta_hashkey": doc.get("hashKey"),
+                "eta_longid": doc.get("longId"),
+                "eta_submissionid": submission_id,
+                "eta_status": eta_status,
             }
-        frappe.db.set_value(self.from_doctype, docname, fields)
+        available_fields = {
+            fieldname: value
+            for fieldname, value in fields.items()
+            if frappe.get_meta(self.from_doctype).has_field(fieldname)
+        }
+        if available_fields:
+            frappe.db.set_value(self.from_doctype, docname, available_fields)
 
     @frappe.whitelist()
     def get_submission_status(self):
@@ -94,33 +101,45 @@ class ETALog(Document):
         submitter = EReceiptSubmitter(connector)
         eta_response = submitter.get_receipt_submission(self.submission_id)
 
-        if eta_response.get("status") == "Invalid":
-            # update submission status
-            self.db_set("submission_status", "Partially Succeeded")
-
         if eta_response and isinstance(eta_response, dict):
+            receipt_count = eta_response.get("receiptsCount", 0)
+            invalid_count = eta_response.get("invalidReceiptsCount", 0)
+            if eta_response.get("status") == "Valid":
+                self.db_set("submission_status", "Completed")
+            elif eta_response.get("status") == "Invalid":
+                status = "Failed" if receipt_count and invalid_count == receipt_count else "Partially Succeeded"
+                self.db_set("submission_status", status)
+
             meg = f"receipts Count = {eta_response.get('receiptsCount')}\ninvalid Receipts Count = {eta_response.get('invalidReceiptsCount')}"
             self.db_set("submission_summary", meg)
-            receipts = [
-                {"receiptNumber": r.get("receiptNumber"), "uuid": r.get("uuid"), "errors": r.get("errors")}
-                for r in eta_response.get("receipts", [])
-                if r.get("errors")
-            ]
+            error_receipts = []
+            for receipt in eta_response.get("receipts", []):
+                receipt_number = receipt.get("receiptNumber")
+                receipt_uuid = receipt.get("uuid")
+                errors = receipt.get("errors") or []
+                receipt_status = receipt.get("status")
+                child_filters = {"parent": self.name, "reference_document": receipt_number}
+                if receipt_uuid:
+                    child_filters["uuid"] = receipt_uuid
+                if frappe.db.exists("ETA Log Documents", child_filters):
+                    child_fields = {"accepted": receipt_status == "Valid", "error": str(errors) if errors else ""}
+                    if receipt_uuid:
+                        child_fields["uuid"] = receipt_uuid
+                    frappe.db.set_value("ETA Log Documents", child_filters, child_fields)
 
-            for r in receipts:
-                if r.get("errors"):
-                    # update errors on child table
-                    frappe.db.set_value(
-                        dt="ETA Log Documents",
-                        dn={"parent": self.name, "uuid": r["uuid"], "reference_document": r.get("receiptNumber")},
-                        field={
-                            "error": str(r.get("errors")),
-                            "accepted": False,
-                        },
-                    )
-                    r.pop("errors")
+                if self.from_doctype and frappe.db.exists(self.from_doctype, receipt_number):
+                    invoice_fields = {}
+                    if receipt_status and frappe.get_meta(self.from_doctype).has_field("eta_status"):
+                        invoice_fields["eta_status"] = receipt_status
+                    if frappe.get_meta(self.from_doctype).has_field("eta_error_message"):
+                        invoice_fields["eta_error_message"] = json.dumps(errors, ensure_ascii=False) if errors else ""
+                    if invoice_fields:
+                        frappe.db.set_value(self.from_doctype, receipt_number, invoice_fields)
 
-            eta_response["receipts"] = receipts
+                if errors:
+                    error_receipts.append({"receiptNumber": receipt_number, "uuid": receipt_uuid, "errors": errors})
+
+            eta_response["receipts"] = error_receipts
             self.db_set("eta_submission_status", eta_response.get("status"))
             self.db_set("eta_response", str(json.dumps(eta_response, indent=4)))
 
@@ -131,11 +150,10 @@ class ETALog(Document):
         submitter = EReceiptSubmitter(connector)
         for doc in self.documents:
             eta_response = submitter.get_receipt_status(doc.uuid)
-            fieldname = "eta_status" if doc.reference_doctype == "Sales Invoice" else "custome_eta_status"
             if isinstance(eta_response, dict):
                 if eta_response.get("receipt", {}).get("status"):
                     receipt_status = eta_response["receipt"]["status"]
-                    frappe.db.set_value(doc.reference_doctype, doc.reference_document, fieldname, receipt_status)
+                    frappe.db.set_value(doc.reference_doctype, doc.reference_document, "eta_status", receipt_status)
                     doc.db_set("eta_status", receipt_status)
 
 
@@ -226,3 +244,37 @@ class ETALog(Document):
         self.submission_summary = "\n".join(summary)
         # Store full response
         self.eta_response = json.dumps(submission_response, indent=4)
+
+
+def auto_validate_pending_submissions():
+    """Scheduled task: poll ETA for every submission still in a non-final state.
+
+    Mirrors etams's ``auto_validate_invoice``/``check_cr_documents_3days`` cron jobs, but
+    reuses ETALog's own (already correct) status-check methods so POS and Sales Invoice
+    submissions both get polled from a single job, without needing etams installed.
+    """
+    pending_statuses = ["Started", "Partially Succeeded"]
+    logs = frappe.get_all(
+        "ETA Log",
+        filters={"submission_status": ["in", pending_statuses]},
+        fields=["name", "from_doctype", "submission_id"],
+        limit_page_length=0,
+    )
+    for row in logs:
+        try:
+            log = frappe.get_doc("ETA Log", row.name)
+            if row.from_doctype == "Sales Invoice":
+                if log.submission_id:
+                    log.update_documents_status()
+            else:
+                if log.submission_id:
+                    log.get_submission_status()
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(
+                title="ETA Auto Validation Error",
+                message=frappe.get_traceback(),
+                reference_doctype="ETA Log",
+                reference_name=row.name,
+            )

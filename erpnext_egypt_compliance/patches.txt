@@ -1,0 +1,1 @@
+erpnext_egypt_compliance.patches.v1_0.claim_pos_invoice_eta_fields
