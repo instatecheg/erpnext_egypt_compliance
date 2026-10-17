@@ -12,5 +12,9 @@ def execute():
         if field["dt"] == "POS Invoice" or field["name"] in {
             "Item-eta_egs_code", "Item-eta_gs1_code"
         }:
-            custom_fields.setdefault(field["dt"], []).append(field)
+            definition = {
+                key: value for key, value in field.items()
+                if key not in {"creation", "modified", "owner", "modified_by", "docstatus", "idx"}
+            }
+            custom_fields.setdefault(field["dt"], []).append(definition)
     create_custom_fields(custom_fields, update=True)

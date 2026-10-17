@@ -76,6 +76,22 @@ def test_reconciliation_does_not_change_sites_still_using_etams(monkeypatch):
     migration.reconcile_retired_fields()
 
 
+def test_receipt_reconciliation_does_not_replay_fixture_audit_timestamps(monkeypatch):
+    from erpnext_egypt_compliance.patches.v1_0 import claim_pos_invoice_eta_fields
+
+    definitions = {}
+    monkeypatch.setattr(
+        claim_pos_invoice_eta_fields, "create_custom_fields",
+        lambda fields, update: definitions.update(fields),
+    )
+    claim_pos_invoice_eta_fields.execute()
+    fields = [field for rows in definitions.values() for field in rows]
+    assert len(fields) == 23
+    assert all(not {"creation", "modified", "owner", "modified_by", "docstatus", "idx"}.intersection(field)
+               for field in fields)
+    assert any(field["fieldname"] == "eta_status" for field in fields)
+
+
 def test_reconciliation_reapplies_receipt_fields_and_removes_dangling_links(monkeypatch):
     from erpnext_egypt_compliance.patches.v1_0 import claim_pos_invoice_eta_fields
 
