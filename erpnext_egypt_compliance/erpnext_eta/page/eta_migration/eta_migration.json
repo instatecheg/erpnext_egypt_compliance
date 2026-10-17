@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "module": "ERPNext ETA",
+ "name": "eta-migration",
+ "page_name": "eta-migration",
+ "standard": "Yes",
+ "title": "ETA Migration",
+ "roles": [{"role": "System Manager"}]
+}
