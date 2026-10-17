@@ -1,0 +1,23 @@
+{
+ "doctype": "DocType",
+ "name": "ETA Legacy Record",
+ "module": "ERPNext ETA",
+ "engine": "InnoDB",
+ "autoname": "hash",
+ "field_order": ["source_doctype", "source_name", "source_parent", "receipt_uuid", "payload"],
+ "fields": [
+  {"fieldname": "source_doctype", "fieldtype": "Data", "label": "Legacy DocType", "read_only": 1, "in_list_view": 1, "in_standard_filter": 1},
+  {"fieldname": "source_name", "fieldtype": "Data", "label": "Legacy Record", "read_only": 1, "in_list_view": 1, "search_index": 1},
+  {"fieldname": "source_parent", "fieldtype": "Data", "label": "Legacy Parent Log", "read_only": 1, "in_standard_filter": 1},
+  {"fieldname": "receipt_uuid", "fieldtype": "Data", "label": "ETA UUID", "read_only": 1, "in_standard_filter": 1},
+  {"fieldname": "payload", "fieldtype": "Code", "options": "JSON", "label": "Archived Record", "read_only": 1}
+ ],
+ "permissions": [{"role": "System Manager", "read": 1, "report": 1}],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "index_web_pages_for_search": 0,
+ "track_changes": 0,
+ "actions": [],
+ "links": [],
+ "states": []
+}

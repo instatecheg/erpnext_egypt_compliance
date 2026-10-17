@@ -79,8 +79,54 @@ site; no production credentials or business records are included in fixtures.
 Its uninstall hook deletes shared Custom Field records without checking their
 module. A backed-up, separately tested migration must preserve historical
 UUIDs/statuses and restore shared metadata, retire legacy scripts/jobs and resolve
-overlapping DocTypes before removal. This fresh-install change does not perform
-that migration or disable a legacy app.
+overlapping DocTypes before removal. Fixture installation alone does not perform
+that migration or disable a legacy app; follow the guarded procedure below.
+
+### Retiring ETAMS on an existing site
+
+The local retirement rehearsal archives legacy rows under **ETA Legacy Record**,
+read-only for System Managers. Search by Legacy DocType, Legacy Record, Legacy
+Parent Log or ETA UUID. Log-detail rows remain separate archive records; they
+are not converted into submission-ready compliance logs. Token caches are
+discarded, not archived. An archive is not a full database/files backup.
+
+Install compliance before removal. Deploy the guarded ETAMS uninstall hook
+alongside it; the unmodified ETAMS hook does not preserve shared fields. Pause
+the site scheduler, stop/drain existing ETA workers and prevent new invoice
+submissions for the maintenance window. This migration does not submit to ETA.
+
+The ETAMS hook patch is included at
+[`deployment/etams-uninstall-guard.patch`](deployment/etams-uninstall-guard.patch).
+Apply it to the ETAMS repository, commit it to your own ETAMS deployment branch,
+and deploy that branch before uninstalling. It is already applied in the local
+rehearsal; installing compliance does not automatically patch another app.
+From the ETAMS repository, apply it with
+`git apply --unidiff-zero ../erpnext_egypt_compliance/deployment/etams-uninstall-guard.patch`.
+Do not use Frappe's uninstall `--dry-run` as a read-only check: this Frappe
+version still runs the uninstall hooks during a dry run.
+
+```bash
+bench --site your-site.com disable-scheduler
+bench --site your-site.com migrate --skip-search-index
+bench --site your-site.com execute erpnext_egypt_compliance.legacy_migration.prepare
+bench --site your-site.com uninstall-app etams --yes
+bench --site your-site.com migrate --skip-search-index
+bench --site your-site.com execute erpnext_egypt_compliance.legacy_migration.verify_retirement
+```
+
+Preparation rejects unmigrated ETA Receipt Settings records and enabled database
+scripts referencing ETAMS. Connector credentials, company/customer mappings and
+tax mappings must be reviewed separately; this is not an automatic conversion of
+every ETAMS setting. The guard checks row hashes before deletion, and verification
+checks archived contents plus invoice counts, docstatus and all `eta_*` column
+values after removal. Keep the scheduler paused until operational review is done.
+
+On retired sites, the compliance migration hook reapplies canonical POS/Item
+receipt definitions after customization imports and removes links to deleted
+legacy DocTypes. This handles old seafood customization exports that otherwise
+restore invalid layouts/status options on every migration. Retire those stale
+exports in that site's customization repository as follow-up cleanup; do not
+remove unrelated customizations.
 
 ### Stage 2 (not included)
 

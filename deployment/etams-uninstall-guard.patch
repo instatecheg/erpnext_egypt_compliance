@@ -1,0 +1,14 @@
+diff --git a/etams/uninstall.py b/etams/uninstall.py
+--- a/etams/uninstall.py
++++ b/etams/uninstall.py
+@@ -1 +1,2 @@
+ import click
++import frappe
+@@ -8 +9,6 @@
+-		remove()
++		if "erpnext_egypt_compliance" in frappe.get_installed_apps():
++			from erpnext_egypt_compliance.legacy_migration import before_etams_uninstall
++
++			before_etams_uninstall()
++		else:
++			remove()
