@@ -128,6 +128,74 @@ restore invalid layouts/status options on every migration. Retire those stale
 exports in that site's customization repository as follow-up cleanup; do not
 remove unrelated customizations.
 
+### ETAMS-free Cloud restore and verification page (candidate)
+
+Compliance now includes **ETA Migration** at `/app/eta-migration`, accessible
+only to System Managers. It shows archived counts, blockers, connector mappings
+and persistent verification results. Verification/cleanup actions run on the
+long worker; refresh shows failures with an Error Log link. A terminated worker
+is shown as interrupted rather than successful. The page also verifies sites
+retired through the earlier uninstall process and fresh compliance-only sites.
+
+The new bootstrap path does **not** import ETAMS or invoke its uninstall hooks.
+Its code must be available on the destination bench, but ETAMS need not be.
+It is a migration candidate: the existing v15 retirement has been rehearsed,
+but a raw restored database with ETAMS source absent and a full v16 migration
+still require an isolated end-to-end rehearsal. Do not treat the unit tests or
+the already-retired local database as proof of that restore path.
+
+1. Retain a complete database/files backup and the original site encryption key.
+   Restore only into an isolated staging site with outbound ETA traffic blocked.
+   Stop/drain workers, web invoice writers and integrations. Pause the scheduler
+   and enable maintenance mode before restore, and confirm both afterwards.
+2. Make the matching compliance branch available on the bench. Before
+   `install-app` or `migrate` on the restored database, run:
+
+   ```bash
+   bench --site your-site.com disable-scheduler
+   bench --site your-site.com set-maintenance-mode on
+   bench --site your-site.com execute erpnext_egypt_compliance.etams_cloud_migration.bootstrap \
+     --kwargs '{"confirm":"ARCHIVE AND DETACH ETAMS"}'
+   ```
+
+   Bootstrap syncs only its own archive storage, archives legacy rows/schema
+   metadata/scripts and hashes invoice identities, docstatus and existing
+   `eta_*`/`etas_*` columns. Only after verification does it detach the stale
+   ETAMS registration and stop its scheduled jobs. It leaves source tables,
+   fields and credentials intact for the next review. Token caches are not
+   archived. Partial archives can be resumed; source/invoice changes block
+   continuing a detached migration.
+3. Install compliance if its registration was absent from the restored backup,
+   then migrate. Keep the scheduler paused and all business integrations stopped.
+   Allow only administrators to the isolated site, turn maintenance mode off,
+   and open **ETA Migration**. No install hook secretly retires ETAMS.
+4. Recreate/review saved **ETA Connector** and **ETA POS Connector** records.
+   Use **Map Connectors** to map each legacy configuration and explicitly
+   confirm branch/tax/signer review. The server checks identity, environment,
+   shared address fields and decrypted client secrets, without returning
+   secrets to the page. Preserve the original encryption key. Credentials are
+   not guessed or automatically converted; token refresh and ETA submission
+   are never called by this wizard.
+5. Disable/replace active Client/Server Scripts referencing ETAMS. Run **Verify**.
+   Review the result, then explicitly confirm **Clean Up ETAMS**. Cleanup removes
+   archived legacy metadata, scripts and jobs while retaining compliance-owned
+   DocTypes/fields. Changed sources, invoices, ownership or unmapped connectors
+   block cleanup. The completion check runs before committing removal.
+6. Migrate again and rerun **Verify**. Check company/tax mappings, signer,
+   offline sale/return payloads and normal ERPNext workflows before go-live.
+   Resuming workers, integrations and the scheduler is a separate operator action.
+
+Source tables, encrypted legacy credential rows and invoice columns are
+**deliberately retained**, not physically dropped. They are inert history, not
+an installed integration. This wizard does not compact the database or certify
+ETA acceptance, and its archive does not replace a full backup. System Managers
+can browse archived legacy history under **ETA Legacy Record**.
+
+Cloud must permit a console/bootstrap step **between restore and migration**.
+If its restore job immediately migrates without that control, use a temporary
+preparation site (or coordinate with Cloud support), then upload its cleaned
+backup. Do not deploy ETAMS merely to open this verification page.
+
 ### Stage 2 (not included)
 
 - Generate and attach receipt QR codes and add them to receipt printing.
