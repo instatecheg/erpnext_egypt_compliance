@@ -4,6 +4,9 @@ from erpnext_egypt_compliance.hooks import fixtures, app_title
 
 def after_migrate():
 	"""Set module for custom fields in existing installations"""
+	from erpnext_egypt_compliance.legacy_migration import reconcile_retired_fields
+
+	reconcile_retired_fields()
 	# Extract custom field names from fixtures
 	custom_field_names = next(
 		(f[2] for fixture in fixtures if fixture.get("dt") == "Custom Field"

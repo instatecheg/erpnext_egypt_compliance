@@ -40,7 +40,7 @@ class EReceiptSubmitter:
             return processed_response
         except Exception as e:
             self._handle_exception(e)
-            return {"error": str(e)}
+            raise
     
     def get_receipt_submission(self, submission_id):
         """
@@ -122,8 +122,13 @@ class EReceiptSubmitter:
         """
         eta_session = ETASession().get_session()
         response = eta_session.post(url, headers=headers, data=data)
-        _eta_response = frappe._dict(response.json())
-        _eta_response["status_code"] = response.status_code or None
+        try:
+            _eta_response = frappe._dict(response.json())
+        except ValueError:
+            _eta_response = frappe._dict({"error": response.text[:2000] or "ETA returned an empty response."})
+        _eta_response["status_code"] = response.status_code
+        if response.status_code >= 400 and not _eta_response.get("error"):
+            _eta_response["error"] = _eta_response.get("message") or response.text[:2000]
         return _eta_response
 
     def _process_response(self, eta_response, ereceipts, doctype):
@@ -150,14 +155,26 @@ class EReceiptSubmitter:
         )
 
         if eta_response.get("acceptedDocuments") or eta_response.get("rejectedDocuments"):
-            self._handle_success_response(eta_response, ereceipts, initial_eta_log, doctype)
+            self._handle_success_response(eta_response, ereceipts, initial_eta_log)
 
         if eta_response.get("error"):
             self._handle_error_response(eta_response, initial_eta_log)
+        elif eta_response.get("submissionId"):
+            initial_eta_log.status_code = eta_response.get("status_code")
+            initial_eta_log.submission_id = eta_response.get("submissionId")
+            initial_eta_log.submission_summary = "ETA accepted the submission for asynchronous processing."
+            initial_eta_log.submission_status = "Started"
+            initial_eta_log.save()
+        elif not (eta_response.get("acceptedDocuments") or eta_response.get("rejectedDocuments")):
+            initial_eta_log.status_code = eta_response.get("status_code")
+            initial_eta_log.eta_response = json.dumps(eta_response, ensure_ascii=False)
+            initial_eta_log.submission_status = "Failed"
+            initial_eta_log.submission_summary = "ETA response did not include a submission ID or document results."
+            initial_eta_log.save()
 
         return eta_response
 
-    def _handle_success_response(self, eta_response, ereceipts, eta_log, doctype):
+    def _handle_success_response(self, eta_response, ereceipts, eta_log):
         """
         Handle the successful response from the ETA portal.
 
@@ -171,8 +188,11 @@ class EReceiptSubmitter:
             f"Total no of accepted: {len(eta_response.get('acceptedDocuments', []))}\n"
             f"Total no of rejected: {len(eta_response.get('rejectedDocuments', []))}\n"
         ).strip()
+        accepted_count = len(eta_response.get("acceptedDocuments", []))
+        rejected_count = len(eta_response.get("rejectedDocuments", []))
         submission_status = (
-            "Partially Succeeded" if (len(eta_response.get('acceptedDocuments', [])) < len(ereceipts.get('receipts', [])))
+            "Failed" if accepted_count == 0
+            else "Partially Succeeded" if rejected_count > 0
             else "Completed"
         )
         eta_log.status_code = eta_response.get("status_code", None)
@@ -180,7 +200,7 @@ class EReceiptSubmitter:
         eta_log.submission_summary = summary_message
         eta_log.submission_status = submission_status
         eta_log.save()
-        eta_log.process_documents(eta_response, doctype, eta_log)
+        eta_log.process_documents(eta_response)
 
     def _handle_error_response(self, eta_response, initial_eta_log):
         """

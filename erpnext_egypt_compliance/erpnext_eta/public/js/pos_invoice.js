@@ -1,9 +1,22 @@
 frappe.ui.form.on('POS Invoice', {
-  onload(frm) {
-    console.log("onload");
+  refresh(frm) {
 		frm.trigger("eta_add_download_ereceipt_button");
 		frm.trigger("eta_submit_ereceipt")
 		frm.trigger("add_fetch_status_button")
+    if (frm.doc.docstatus === 1 && !frm.doc.is_return && frm.doc.eta_status === "Valid") {
+      frm.add_custom_button(__("Create Return eReceipt"), () => {
+        frappe.confirm(
+          __("ETA eReceipts are reversed with a return receipt, not cancelled. Create a return draft for review? Nothing will be submitted to ETA."),
+          () => frappe.model.open_mapped_doc({
+            method: "erpnext_egypt_compliance.erpnext_eta.ereceipt_returns.make_return_ereceipt",
+            frm: frm,
+          })
+        );
+      }, __("eReceipt"));
+    }
+    if (frm.doc.is_return) {
+      frm.set_intro(__("Review the return quantities, refund and original invoice. Download eReceipt Json to check the ETA payload. Submit eReceipt is a separate action after local submission."));
+    }
   },
   eta_add_download_ereceipt_button(frm) {
 	  frm.add_custom_button('Download eReceipt Json', () => {
@@ -37,11 +50,11 @@ frappe.ui.form.on('POS Invoice', {
 	},
 	eta_submit_ereceipt(frm) {
 		frm.add_custom_button("Submit eReceipt", () => {
-			frappe.call(
-				{
+			const submit = () => {
+				frappe.call({
 					method: "erpnext_egypt_compliance.erpnext_eta.ereceipt_schema.submit_ereceipt",
 					args: {
-						docname: frm.docname,
+						docname: frm.doc.name,
 						pos_profile: frm.doc.pos_profile,
 						doctype: frm.doc.doctype,
 					},
@@ -49,13 +62,26 @@ frappe.ui.form.on('POS Invoice', {
 					freeze_message: __("Submitting ..."),
 					callback: function (r) {
 						if (!r.exc) {
-							console.log(r)
+							frappe.msgprint({
+								title: __("ETA eReceipt Submission"),
+								message: `<pre>${frappe.utils.escape_html(JSON.stringify(r.message, null, 2))}</pre>`,
+							});
+							frm.reload_doc();
 						}
 					},
-
-
+				});
+			};
+			if (frm.doc.is_return) {
+				if (frm.is_dirty() || frm.doc.docstatus !== 1) {
+					frappe.throw(__("Save and submit the POS return locally before sending it to ETA."));
 				}
-			)
+				frappe.confirm(
+					__("Submit this return eReceipt to ETA using the configured POS environment? This creates a separate tax document; it does not cancel or delete the original receipt."),
+					submit
+				);
+			} else {
+				submit();
+			}
 		}, "eReceipt")
 	},
 	add_fetch_status_button(frm) {

@@ -13,6 +13,8 @@
   "serial_number",
   "access_details_section",
   "pos_profile",
+  "eta_branch",
+  "buyer_id_required_amount",
   "environment",
   "client_id",
   "column_break_iwtj",
@@ -86,6 +88,19 @@
    "options": "POS Profile",
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "eta_branch",
+   "fieldtype": "Link",
+   "label": "ETA Branch",
+   "options": "Branch"
+  },
+  {
+   "default": "50000",
+   "fieldname": "buyer_id_required_amount",
+   "fieldtype": "Currency",
+   "label": "Buyer ID Required Amount",
+   "description": "For person buyers, require a valid 14-digit national ID when the receipt total reaches this amount. Set to 0 to disable the amount check."
   },
   {
    "fieldname": "environment",

@@ -1,5 +1,41 @@
 # ERPNext Egypt Compliance (ETA Integration)
 
+## Seafood v16 migration candidate
+
+Branch `version-16-seafood` preserves the upstream v16 tax-table adaptations
+and includes the locally tested v15 sale/return and ETAMS retirement workflows.
+It is a v16 validation candidate, not a certified production upgrade.
+Use Frappe/ERPNext v16 and the Python version required by the selected Frappe
+release (the current official v16 branch requires Python 3.14).
+
+Install from `https://github.com/instatecheg/erpnext_egypt_compliance.git`,
+branch `version-16-seafood`. Do not mix this branch with a v15 runtime.
+QR printing and official PDF retrieval remain stage 2.
+
+### Migration gates
+
+1. On an isolated v15 restoration of the current Cloud backup, install compliance,
+   pause schedulers and drain ETA workers. Do not send tax documents from the copy.
+2. Deploy the ETAMS guard from
+   [`deployment/etams-uninstall-guard.patch`](deployment/etams-uninstall-guard.patch)
+   on a temporary v15 retirement branch. Run
+   `erpnext_egypt_compliance.legacy_migration.prepare`, uninstall ETAMS and migrate.
+   Run `erpnext_egypt_compliance.legacy_migration.verify_retirement`.
+   Preparation blocks nonempty legacy POS settings; migrate those connectors first.
+   Preserve database, files and site encryption key for the real Cloud migration.
+3. Only after the v15 retirement check passes, upgrade that copy to the official
+   v16 app branches and the custom v16 candidate branches.
+4. Migrate twice, run the retirement/standalone checks, preview sale/return payloads
+   offline, and test accounting, stock, payroll, lending and ecommerce workflows.
+   Keep ETA submission disabled until go-live is explicitly approved.
+5. Repeat with the final backup during a maintenance window, with a rollback
+   bench and backup retained. Resume integrations only after reconciliation.
+
+Legacy history is browsable as **ETA Legacy Record**, read-only to System Managers.
+The archive stores raw legacy records, not submission-ready compliance logs.
+It does not replace a database-and-files backup. Existing invoice ETA values are
+checked by checksums before and after retirement.
+
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 A comprehensive integration module for ERPNext that streamlines and automates Egyptian tax compliance processes by connecting directly with the Egyptian Tax Authority's (ETA) systems.
@@ -25,10 +61,10 @@ This integration equips ERPNext users with the necessary tools to comply with Eg
 
 ### Prerequisites
 
-- ERPNext installation (version 14 or higher recommended)
+- Frappe and ERPNext v16 for this branch
 - ETA Portal registration
 - Valid Egyptian Tax Authority credentials
-- Python 3.8+ (if installing from source)
+- Python matching the selected Frappe v16 release
 - Git (if installing from source)
 - To Download the Latest Compatible E-Invoice Signer Use This link: https://github.com/Axentorllc/erpnext_egypt_compliance/releases/download/v1.5/ERPNext.ETA.Signer.-.By.Axentor.-.v1.5.zip
 ### Installation
@@ -38,7 +74,7 @@ This integration equips ERPNext users with the necessary tools to comply with Eg
 cd /path/to/your/frappe-bench
 
 # Install the app using bench
-bench get-app erpnext_egypt_compliance https://github.com/Axentorllc/erpnext_egypt_compliance.git
+bench get-app --branch version-16-seafood erpnext_egypt_compliance https://github.com/instatecheg/erpnext_egypt_compliance.git
 
 # Install the app on your site
 bench --site your-site.com install-app erpnext_egypt_compliance
